@@ -1,0 +1,32 @@
+(function(root){
+const types=['belt','sensor','stop','lift','reject'];
+const titles={belt:'Conveyor',sensor:'Photoeye',stop:'Stop gate',lift:'Lift station',reject:'Reject station'};
+const fresh=()=>({stations:{},time:0,feedClock:0,nextBox:1,delivered:0,rejected:0,fed:0,run:false,ready:true,autoFeed:true,loop:false,laps:0,boxLaps:{}});
+function blank(){return {box:null,elapsed:0,phase:'empty',count:0,output:false,local:false,fault:false,reject:false,waiting:0,position:0,processed:false,conflict:false};}
+function sync(config,s){const ids=new Set(config.map(c=>c.id));for(const id of Object.keys(s.stations))if(!ids.has(id))delete s.stations[id];for(const c of config)if(!s.stations[c.id]){s.stations[c.id]=blank();if(c.type==='stop')s.stations[c.id].position=1;}}
+function feed(config,s){sync(config,s);if(s.loop&&(config.length<2||Object.values(s.stations).filter(x=>x.box).length>=config.length-1))return false;if(!config.length||s.stations[config[0].id].box)return false;const st=s.stations[config[0].id];st.box=s.nextBox++;st.count++;st.elapsed=0;st.phase='arrived';s.fed++;return true;}
+function cycleTime(c){return c.seconds+(c.type==='lift'?2.2:c.type==='stop'?.6:0);}
+function nextStation(config,s,i){return config[i+1]||(s.loop&&config.length>1?config[0]:null);}
+function value(token,config,s,i,snapshot){const neg=token.startsWith('!');const t=neg?token.slice(1):token,c=config[i],st=s.stations[c.id];let v=false;if(t==='RUN')v=s.run;else if(t==='READY')v=s.ready;else if(t==='LOCAL')v=st.local;else if(t==='NEXT_CLEAR'){const next=nextStation(config,s,i);v=!next||!snapshot[next.id];}else if(t==='UPPER'||t==='EXTENDED')v=st.position>=1;else if(t==='LOWER'||t==='RETRACTED')v=st.position<=0;else if(t==='OCCUPIED')v=!!snapshot[c.id];else if(t==='TRUE')v=true;else if(t.startsWith('S_'))v=!!snapshot[t.slice(2)];return neg?!v:v;}
+function step(config,s,dt=.1){sync(config,s);s.time+=dt;const snapshot=Object.fromEntries(config.map(c=>[c.id,s.stations[c.id].box]));const transfers=[];const external=s.externalPLC&&root.LineController?root.LineController.scan(config,s,dt):null;
+ for(let i=0;i<config.length;i++){const c=config[i],st=s.stations[c.id],next=nextStation(config,s,i);const a=value(c.a,config,s,i,snapshot),b=value(c.b,config,s,i,snapshot);st.a=a;st.b=b;st.output=(external?!!external['Q_'+c.id]:(c.join==='OR'?a||b:a&&b))&&!st.fault;
+ const separate=c.control==='separate'&&['lift','stop'].includes(c.type);
+ if(separate){const up=external?!!external['UP_'+c.id]:value(c.upA||'LOCAL',config,s,i,snapshot)&&value(c.upB||(c.type==='lift'?'!UPPER':'!EXTENDED'),config,s,i,snapshot),down=external?!!external['DOWN_'+c.id]:value(c.downA||'!LOCAL',config,s,i,snapshot)&&value(c.downB||(c.type==='lift'?'!LOWER':'!RETRACTED'),config,s,i,snapshot);st.up=up;st.down=down;st.conflict=up&&down;if(!st.fault&&!st.conflict){if(up)st.position=Math.min(1,st.position+dt/.8);if(down)st.position=Math.max(0,st.position-dt/.8);}if(st.conflict)st.output=false;}
+ else{st.conflict=false;}
+
+  if(!st.box){st.elapsed=0;st.processed=false;if(!separate)st.position=c.type==='stop'?1:0;st.phase=st.conflict?'command conflict':st.fault?'fault':separate?(st.position>=1?'at upper / extended':st.position<=0?'at lower / retracted':'moving actuator'):'empty';st.waiting=0;continue;}
+  if(separate){if(c.type==='lift'&&st.position>=1)st.processed=true;const mayLeave=st.position<=0&&(c.type==='stop'||st.processed);if(st.output&&mayLeave)st.elapsed=Math.min(cycleTime(c),Math.max(st.elapsed,cycleTime(c)-.3)+dt);else st.elapsed=Math.min(.3,st.elapsed+(st.output?dt:0));}
+ else if(st.output)st.elapsed=Math.min(st.elapsed+dt,cycleTime(c));
+  if(!separate&&c.type==='lift'){const e=st.elapsed;st.position=e<.3?0:e<1.1?(e-.3)/.8:e<1.1+c.seconds?1:e<1.9+c.seconds?Math.max(0,1-(e-1.1-c.seconds)/.8):0;}if(!separate&&c.type==='stop')st.position=st.elapsed<.3+c.seconds?1:0;
+  const cycle=cycleTime(c),complete=st.elapsed+1e-8>=cycle;
+  if(st.conflict)st.phase='command conflict';else if(st.fault)st.phase='fault';else if(separate)st.phase=st.position>=1?(c.type==='lift'?'at upper limit':'extended'):st.position<=0?(c.type==='lift'?'at lower limit':'retracted'):(st.up?'raising / extending':'lowering / retracting');else if(!st.output)st.phase='held';else if(c.type==='lift')st.phase=st.elapsed<.3?'arriving':st.elapsed<1.1?'raising':st.elapsed<1.1+c.seconds?'at upper limit':st.elapsed<1.9+c.seconds?'lowering':'at lower limit';else st.phase=c.type==='stop'?(st.elapsed<.3?'arriving':st.elapsed<.3+c.seconds?'holding':'released'):c.type==='sensor'?'detected':c.type==='reject'?(st.reject?'diverting':'passing'):'moving';
+  if(complete&&st.output){if(c.type==='reject'&&st.reject){transfers.push({i,reject:true});}else if(!next||!snapshot[next.id])transfers.push({i,reject:false});else st.phase='downstream full';}
+  const blocked=!st.output||(complete&&!!next&&!!snapshot[next.id]);st.waiting=blocked?st.waiting+dt:0;
+ }
+ for(const {i,reject} of transfers.reverse()){const st=s.stations[config[i].id],box=st.box,target=nextStation(config,s,i);if(reject)s.rejected++;else if(!target)s.delivered++;else{const next=s.stations[target.id];if(next.box)continue;next.box=box;next.elapsed=0;next.count++;next.phase='arrived';next.processed=false;if(s.loop&&i===config.length-1){s.laps++;s.boxLaps[box]=(s.boxLaps[box]||0)+1;}}st.box=null;st.elapsed=0;st.processed=false;st.waiting=0;st.phase='empty';}
+ if(s.run&&s.autoFeed){s.feedClock+=dt;if(s.feedClock>=1.8&&feed(config,s))s.feedClock=0;}
+ return s;
+}
+function validate(config){if(!Array.isArray(config)||config.length>12)throw Error('A line can have up to 12 stations.');const seen=new Set();for(const c of config){if(!c||!types.includes(c.type)||!/^N\d+$/.test(c.id)||seen.has(c.id)||!Number.isFinite(c.seconds)||c.seconds<.3||c.seconds>10||!['AND','OR'].includes(c.join)||typeof c.a!=='string'||typeof c.b!=='string')throw Error('Invalid station configuration.');seen.add(c.id);}const tokens=['RUN','READY','LOCAL','NEXT_CLEAR','OCCUPIED','TRUE','UPPER','LOWER','EXTENDED','RETRACTED',...config.map(c=>'S_'+c.id)];for(const c of config)for(const t of [c.a,c.b,...['upA','upB','downA','downB'].map(k=>c[k]).filter(Boolean)])if(!tokens.includes(t.replace(/^!/,'')))throw Error('A condition references a missing station.');return config;}
+root.LineSim={types,titles,fresh,sync,feed,step,validate,value,nextStation,cycleTime};if(typeof module!=='undefined')module.exports=root.LineSim;
+})(typeof window!=='undefined'?window:globalThis);
