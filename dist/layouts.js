@@ -13,22 +13,27 @@ make('Parallel processing','Very hard','Split through two processing cells, then
 make('Rework loop','Expert','Rework parts return through inspection. Accepted parts take the exit branch.',[['A',65,80],['B',245,80,'sensor'],['C',440,80,'sort'],['D',650,80,'exit'],['E',440,300,'stop'],['F',245,300,'lift'],['G',65,300]],[['A','B','C','D'],['A','B','C','E','F','G','A','B','C','D']]),
 make('Integrated factory','Extremely difficult','Coordinate two feeds, a merge, parallel cells, a lift, and a recirculating inspection route.',[['A',55,60],['B',210,60,'stop'],['C',55,340],['D',210,340,'stop'],['E',355,200,'merge'],['F',490,200,'sort'],['G',490,60,'lift'],['H',660,60,'sensor'],['I',490,340,'stop'],['J',660,340,'sensor'],['K',800,200,'merge'],['L',955,200,'exit']],[['A','B','E','F','G','H','K','L'],['C','D','E','F','I','J','K','L'],['A','B','E','F','I','J','K','E','F','G','H','K','L']])
 ];
-function fresh(layout){return {time:0,fed:0,delivered:0,run:false,ready:true,nextId:1,turn:0,feedTime:0,stations:Object.fromEntries(layout.nodes.map(n=>[n.id,{box:null,elapsed:0,fault:false,enabled:true,hold:1,condition:'RUN',output:false}]))};}
-function feed(layout,s){if(s.fed-s.delivered>=Math.max(1,Math.floor(layout.nodes.length/3)))return false;const r=layout.routes[s.turn%layout.routes.length],first=s.stations[r[0]];if(first.box)return false;first.box={id:s.nextId++,route:r.slice(),pos:0};first.elapsed=0;s.fed++;s.turn++;return true;}
-function tick(layout,s,dt=.1,auto=true){s.time+=dt;if(!s.run){for(const st of Object.values(s.stations))st.output=false;return;}
+function outgoing(layout,id){return [...new Set(layout.routes.flatMap(r=>r.flatMap((v,i)=>v===id&&r[i+1]?[r[i+1]]:[])))];}
+function fresh(layout){return {time:0,fed:0,delivered:0,run:false,ready:true,nextId:1,turn:0,feedTime:0,violations:[],stations:Object.fromEntries(layout.nodes.map(n=>[n.id,{box:null,elapsed:0,fault:false,output:false,position:0,raised:false,hold:0,conflict:false}]))};}
+function feed(layout,s){if(s.fed-s.delivered>=Math.max(1,Math.floor(layout.nodes.length/3)))return false;const r=layout.routes[s.turn%layout.routes.length],first=s.stations[r[0]];if(first.box)return false;first.box={id:s.nextId++,route:r.slice(),pos:0};first.elapsed=0;first.raised=false;first.hold=0;s.fed++;s.turn++;return true;}
+function inputs(layout,s){const bits={RUN:s.run,READY:s.ready,FAULT:Object.values(s.stations).some(st=>st.fault),TRUE:true};for(const n of layout.nodes){const st=s.stations[n.id];bits['S_'+n.id]=!!st.box;bits['FAULT_'+n.id]=st.fault;bits['UPPER_'+n.id]=st.position>=1;bits['LOWER_'+n.id]=st.position<=0;bits['CYCLED_'+n.id]=st.raised;const target=st.box?.route[st.box.pos+1];bits['CLEAR_'+n.id]=!target||!s.stations[target].box;for(const to of outgoing(layout,n.id))bits['WANT_'+n.id+'_'+to]=!!st.box&&target===to;}return bits;}
+function outputs(layout){return layout.nodes.flatMap(n=>['Q_'+n.id,...(n.type==='stop'?['RELEASE_'+n.id]:[]),...(n.type==='lift'?['UP_'+n.id,'DOWN_'+n.id]:[]),...(outgoing(layout,n.id).length>1?outgoing(layout,n.id).map(to=>'ROUTE_'+n.id+'_'+to):[])]);}
+function tick(layout,s,dt=.1,auto=true,commands={}){s.time+=dt;
  const occupied=new Set(Object.entries(s.stations).filter(([id,st])=>st.box).map(([id])=>id));
- // Snapshot occupancy plus reservations prevents both overlapping handoffs and a box moving twice per scan.
  const reserved=new Set(occupied),moves=[];
- for(const n of layout.nodes){const st=s.stations[n.id];const condition=st.condition==='RUN'?s.run:st.condition==='READY'?s.ready:st.condition==='NOT_READY'?!s.ready:false;
- st.output=st.enabled&&!st.fault&&condition;
- if(!st.box||!st.output)continue;
- st.elapsed+=dt;const duration=n.type==='lift'?st.hold+1.6:n.type==='stop'?st.hold:.8;
- if(st.elapsed<duration)continue;
- const target=st.box.route[st.box.pos+1];if(!target){moves.push([n.id,null]);continue;}
+ for(const n of layout.nodes){const st=s.stations[n.id];st.output=!!commands['Q_'+n.id]&&!st.fault;st.conflict=false;if(!s.run){st.output=false;continue;}if(st.fault)continue;
+ if(n.type==='lift'){const up=!!commands['UP_'+n.id],down=!!commands['DOWN_'+n.id];st.conflict=up&&down;if(st.conflict){if(!s.violations.includes('Opposing lift commands at '+n.id))s.violations.push('Opposing lift commands at '+n.id);continue;}if(up)st.position=Math.min(1,st.position+dt/.8);if(down)st.position=Math.max(0,st.position-dt/.8);if(st.box&&st.position>=1)st.raised=true;}
+ if(!st.box)continue;st.hold+=dt;if(!st.output)continue;
+ if(n.type==='stop'&&!commands['RELEASE_'+n.id])continue;
+ if(n.type==='lift'&&(!st.raised||st.position>0))continue;
+ st.elapsed+=dt;if(st.elapsed<.8)continue;
+ const target=st.box.route[st.box.pos+1],choices=outgoing(layout,n.id);
+ if(choices.length>1){const chosen=choices.filter(to=>commands['ROUTE_'+n.id+'_'+to]);if(chosen.length!==1||chosen[0]!==target){if(chosen.length&& !s.violations.includes('Incorrect routing at '+n.id))s.violations.push('Incorrect routing at '+n.id);continue;}}
+ if(!target){moves.push([n.id,null]);continue;}
  if(!reserved.has(target)){moves.push([n.id,target]);reserved.add(target);}
  }
- for(const [from,to]of moves){const st=s.stations[from],box=st.box;st.box=null;st.elapsed=0;if(to){box.pos++;s.stations[to].box=box;s.stations[to].elapsed=0;}else s.delivered++;}
- if(auto){s.feedTime+=dt;if(s.feedTime>=1.5){if(feed(layout,s))s.feedTime=0;}}
+ for(const [from,to]of moves){const st=s.stations[from],box=st.box;st.box=null;st.elapsed=0;st.raised=false;st.hold=0;if(to){box.pos++;const dest=s.stations[to];dest.box=box;dest.elapsed=0;dest.raised=false;dest.hold=0;}else s.delivered++;}
+ if(auto&&s.run){s.feedTime+=dt;if(s.feedTime>=1.5){if(feed(layout,s))s.feedTime=0;}}
 }
-root.LayoutLab={layouts,fresh,feed,tick};if(typeof module!=='undefined')module.exports=root.LayoutLab;
+root.LayoutLab={layouts,fresh,feed,tick,inputs,outputs,outgoing};if(typeof module!=='undefined')module.exports=root.LayoutLab;
 })(typeof window==='undefined'?globalThis:window);
