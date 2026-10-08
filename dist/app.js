@@ -12,7 +12,23 @@ let index=saved.current,program={},state=PLC.fresh(),inputs={},running=false,pic
 function persist(){if(randomLesson)return;saved.current=index;saved.drafts[index]={...program};try{localStorage.setItem('plcquest.v1',JSON.stringify(saved));}catch{storageOK=false;}$('storageNote').textContent=storageOK?'Progress saves in this browser.':'Browser storage is unavailable. Progress lasts for this visit.';}
 function nav(){let last='';$('lessonList').innerHTML=LESSONS.map(l=>{let group=l.section!==last?`<div class="groupname">${l.section}</div>`:'';last=l.section;return group+`<button data-level="${l.id}" class="${l.id===index&&!randomLesson?'active ':''}${saved.done.includes(l.id)?'complete':''}" ${l.id===index&&!randomLesson?'aria-current="step"':''}><span class="num">${saved.done.includes(l.id)?'✓':String(l.id+1).padStart(2,'0')}</span><span>${l.title}</span></button>`;}).join('');$('progressTop').textContent=`${saved.done.length} / ${LESSONS.length}`;$('progressText').textContent=`${saved.done.length} of ${LESSONS.length} challenges complete`;$('progressFill').style.width=(saved.done.length/LESSONS.length*100)+'%';}
 function pause(){running=false;clearInterval(timer);timer=null;update();}
-function setCheckState(status="idle"){const button=$("check");button.dataset.result=status;button.textContent=status==="wrong"?"Try again":status==="correct"?"Correct":"Test my logic";}
+let checkTransition=null;
+function setCheckState(status="idle"){
+ clearTimeout(checkTransition);checkTransition=null;
+ const button=$("check");button.dataset.result=status;
+ button.textContent=status==="wrong"?"Try again":status==="correct"?"Correct":"Test my logic";
+ if(status==="correct")checkTransition=setTimeout(()=>{
+  checkTransition=null;button.dataset.result="correct";button.dataset.action="next";
+  button.textContent=randomLesson?'Another random challenge':index===LESSONS.length-1?'Practice from the beginning':'Next challenge';
+ },900);
+ button.dataset.action=status==="correct"?"waiting":"check";
+}
+function nextChallenge(){return randomLesson?randomPractice():load((index+1)%LESSONS.length);}
+function checkOrAdvance(){
+ if($("check").dataset.action==="next")return nextChallenge();
+ if($("check").dataset.action==="waiting")return;
+ return check();
+}
 function allowedTokens(l){return [...new Set(['EMPTY',...l.inputs,...l.rungs.map(r=>r.out).filter(Boolean),'MOTOR','DONE','TIMING',...(l.extraTokens||[])].flatMap(t=>t==='EMPTY'||/[<>=]/.test(t)?[t]:[t,'!'+t]))];}
 function load(n,practice=null){
  if(!Number.isInteger(n)||n<0||n>=LESSONS.length)throw Error('Choose an available lesson.');
@@ -120,7 +136,7 @@ $('inputs').onclick=e=>{const b=e.target.closest('[data-input]');if(b&&!b.disabl
 $('sensorMode').onchange=()=>{pause();sensorMode=$('sensorMode').value;state=PLC.fresh();plant=Conveyor.fresh();inputs=Object.fromEntries(currentLesson().inputs.map(k=>[k,false]));update();};
 $('run').onclick=()=>{if(running)pause();else{running=true;step();timer=setInterval(step,100/lessonSpeed);update();}};
 $('step').onclick=()=>{pause();step();};$('reset').onclick=()=>{pause();partialScan=null;state=PLC.fresh();plant=Conveyor.fresh();inputs=Object.fromEntries(currentLesson().inputs.map(k=>[k,false]));update();};
-$('clear').onclick=()=>{pause();failedAttempts=0;program={...currentLesson().initial};inputs=Object.fromEntries(currentLesson().inputs.map(k=>[k,false]));renderLadder();invalidate();};$('check').onclick=check;$('hint').onclick=()=>{window.Tutor?.hint();feedback(currentLesson().hint)};$('next').onclick=()=>randomLesson?randomPractice():load((index+1)%LESSONS.length);
+$('clear').onclick=()=>{pause();failedAttempts=0;program={...currentLesson().initial};inputs=Object.fromEntries(currentLesson().inputs.map(k=>[k,false]));renderLadder();invalidate();};$('check').onclick=checkOrAdvance;$('hint').onclick=()=>{window.Tutor?.hint();feedback(currentLesson().hint)};$('next').onclick=nextChallenge;
 $('inputs').oninput=e=>{if(e.target.dataset.number){inputs[e.target.dataset.number]=Number(e.target.value);$('value-'+e.target.dataset.number).textContent=e.target.value;}};
 $('modeLessons').onclick=()=>{showMode('lessons');load(index);};$('modeRandom').onclick=randomPractice;$('modeSandbox').onclick=()=>showMode('sandbox');
 document.addEventListener('visibilitychange',()=>{if(document.hidden)pause();});load(index);
